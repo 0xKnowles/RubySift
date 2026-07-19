@@ -165,6 +165,12 @@ func (c *Client) Get(name string) ([]byte, error) {
 	return data, nil
 }
 
+// stallLimit bounds how long readWithProgress will wait without any forward progress at all
+// before giving up. A per-Read timeout alone doesn't catch this: go.bug.st/serial returns (0, nil)
+// on an individual read timing out, so a device that has stopped sending entirely (rather than
+// erroring) would otherwise leave this looping — and the request hanging — forever.
+const stallLimit = 90 * time.Second
+
 // readWithProgress fills buf completely, logging periodic progress to stderr. A multi-megabyte
 // .pclog over a serial link can take long enough that silence is indistinguishable from a hang —
 // this is the only feedback for that stretch (the browser just shows an unchanging "Pulling...").
@@ -172,12 +178,20 @@ func readWithProgress(r io.Reader, buf []byte, label string) error {
 	const logInterval = 2 * time.Second
 	start := time.Now()
 	lastLog := start
+	lastProgress := start
 	total := 0
 	for total < len(buf) {
 		n, err := r.Read(buf[total:])
-		total += n
+		if n > 0 {
+			total += n
+			lastProgress = time.Now()
+		}
 		if err != nil {
 			return err
+		}
+		if time.Since(lastProgress) >= stallLimit {
+			return fmt.Errorf("usbdevice: stalled at %d/%d bytes (%s), no progress for %s", total, len(buf), label,
+				stallLimit)
 		}
 		if time.Since(lastLog) >= logInterval {
 			elapsed := time.Since(start).Seconds()
