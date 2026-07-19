@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 )
 
@@ -19,5 +20,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	log.Printf("error %d: %s", status, msg)
 	writeJSON(w, status, map[string]string{"error": msg})
 }
