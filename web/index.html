@@ -16,10 +16,10 @@
   <h2>Open a log</h2>
   <p class="hint">The decryption key is held in memory only for this session and is never written to disk.</p>
   <form id="open-form">
-    <label>.rub file path
-      <input type="text" id="path" placeholder="/path/to/log.rub" required />
+    <label>.pclog file path
+      <input type="text" id="path" placeholder="/path/to/20260717.pclog" required />
     </label>
-    <label>Passphrase or 64-char hex key
+    <label>Device key (Settings &rarr; Reveal log key, 64 hex chars)
       <input type="password" id="secret" placeholder="master key" required />
     </label>
     <button type="submit">Decrypt &amp; Load</button>
@@ -28,12 +28,6 @@
 </section>
 
 <main id="dashboard" hidden>
-  <section class="panel" id="companion-panel">
-    <h2>Companion</h2>
-    <canvas id="companion-canvas" width="96" height="96"></canvas>
-    <div id="companion-stats"></div>
-  </section>
-
   <section class="panel">
     <h2>Pulse Grid <span class="hint">ambient RF density by hour</span></h2>
     <div id="pulse-grid"></div>
@@ -47,7 +41,7 @@
   <section class="panel">
     <h2>Nodes</h2>
     <table id="node-table">
-      <thead><tr><th>MAC</th><th>Type</th><th>Sightings</th><th>Avg RSSI</th><th>Max RSSI</th></tr></thead>
+      <thead><tr><th>MAC</th><th>Type</th><th>Label</th><th>Sightings</th><th>Avg RSSI</th><th>Max RSSI</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>

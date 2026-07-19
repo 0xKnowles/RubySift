@@ -17,21 +17,20 @@ import (
 	"github.com/0xKnowles/RubySift/internal/parser"
 )
 
-// Session holds the decrypted results of one .rub file for as long as the
-// app is open. The key is zeroed and dropped as soon as decoding finishes.
+// Session holds the decrypted results of one .pclog file for as long as
+// the app is open. The key is zeroed and dropped as soon as decoding
+// finishes.
 type Session struct {
 	mu         sync.RWMutex
 	loaded     bool
 	sourceFile string
 	records    []parser.Record
-	companion  *parser.CompanionState
 }
 
 func (s *Session) reset() {
 	s.loaded = false
 	s.sourceFile = ""
 	s.records = nil
-	s.companion = nil
 }
 
 // Server wires the Session to HTTP handlers plus the embedded static UI.
@@ -56,7 +55,6 @@ func (s *Server) routes(assets http.FileSystem) {
 	s.mux.HandleFunc("/api/records", s.handleRecords)
 	s.mux.HandleFunc("/api/pulse", s.handlePulse)
 	s.mux.HandleFunc("/api/proximity", s.handleProximity)
-	s.mux.HandleFunc("/api/companion", s.handleCompanion)
 }
 
 type openRequest struct {
@@ -66,9 +64,8 @@ type openRequest struct {
 }
 
 type openResponse struct {
-	Records   int    `json:"records"`
-	Companion bool   `json:"companion_state_found"`
-	Source    string `json:"source"`
+	Records int    `json:"records"`
+	Source  string `json:"source"`
 }
 
 func resolveKey(req openRequest) ([cipher.KeySize]byte, error) {
@@ -127,19 +124,10 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var records []parser.Record
-	var companion *parser.CompanionState
 	err = sess.DecryptStream(f, func(plain []byte) error {
 		rec, err := parser.Decode(plain)
 		if err != nil {
 			return err
-		}
-		if rec.Type == parser.RecordCompanionState {
-			cs, err := parser.DecodeCompanion(plain)
-			if err != nil {
-				return err
-			}
-			companion = &cs
-			return nil
 		}
 		records = append(records, rec)
 		return nil
@@ -153,13 +141,11 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	s.session.loaded = true
 	s.session.sourceFile = req.Path
 	s.session.records = records
-	s.session.companion = companion
 	s.session.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, openResponse{
-		Records:   len(records),
-		Companion: companion != nil,
-		Source:    req.Path,
+		Records: len(records),
+		Source:  req.Path,
 	})
 }
 
@@ -215,19 +201,6 @@ func (s *Server) handleProximity(w http.ResponseWriter, r *http.Request) {
 	s.session.mu.RLock()
 	defer s.session.mu.RUnlock()
 	writeJSON(w, http.StatusOK, analytics.ProximityClusters(s.session.records))
-}
-
-func (s *Server) handleCompanion(w http.ResponseWriter, r *http.Request) {
-	if !s.requireLoaded(w) {
-		return
-	}
-	s.session.mu.RLock()
-	defer s.session.mu.RUnlock()
-	if s.session.companion == nil {
-		writeError(w, http.StatusNotFound, "no companion state block found in this log")
-		return
-	}
-	writeJSON(w, http.StatusOK, s.session.companion)
 }
 
 func zero(b []byte) {

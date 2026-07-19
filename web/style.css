@@ -92,27 +92,8 @@ button:hover { filter: brightness(1.1); }
 .error { color: var(--accent); min-height: 1.2em; font-size: 0.85rem; }
 
 #dashboard {
-  display: grid;
-  grid-template-columns: 1fr 2fr;
-  gap: 0;
+  display: block;
 }
-
-#companion-panel { grid-column: 1; }
-#dashboard > .panel:nth-child(2),
-#dashboard > .panel:nth-child(3),
-#dashboard > .panel:nth-child(4) { grid-column: 2; }
-
-#companion-canvas {
-  image-rendering: pixelated;
-  width: 192px;
-  height: 192px;
-  background: #0b0d12;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-#companion-stats { margin-top: 0.75rem; font-size: 0.85rem; color: var(--muted); line-height: 1.6; }
-#companion-stats b { color: var(--text); }
 
 #pulse-grid {
   display: grid;

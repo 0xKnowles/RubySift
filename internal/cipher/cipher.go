@@ -1,39 +1,48 @@
 // Package cipher implements the AES-256-GCM decryption pipeline used to
-// recover plaintext telemetry records from Ruby's raw .rub log files.
+// recover plaintext telemetry records from Ruby's raw .pclog files.
 //
-// On-disk frame layout (as written by the ESP32-C3 firmware):
+// On-disk envelope layout, matching lib/RubyLog/EncryptedLog.cpp
+// (writeEnvelope) in the Ruby firmware:
 //
-//	[ 12-byte IV/nonce ][ 16-byte encrypted record ][ 16-byte GCM auth tag ]
+//	[ 1-byte format version ][ 12-byte nonce ][ 2-byte ciphertext length (LE) ]
+//	[ ciphertext (== PlaintextSize bytes) ][ 16-byte GCM auth tag ]
 //
-// Each frame decrypts to exactly one fixed-width 16-byte plaintext record
-// (see internal/parser for the record schema), so every frame on disk is
-// exactly 44 bytes wide.
+// No additional authenticated data (AAD) is used — only the plaintext
+// payload is encrypted and authenticated; the version/nonce/length header
+// is written and read as-is. Every envelope is a fixed EnvelopeSize bytes,
+// so record N always starts at byte N*EnvelopeSize.
 package cipher
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 )
 
 const (
-	NonceSize  = 12
-	RecordSize = 16
-	TagSize    = 16
-	FrameSize  = NonceSize + RecordSize + TagSize
-	KeySize    = 32 // AES-256
+	FormatVersion   = 1
+	NonceSize       = 12
+	LengthFieldSize = 2
+	TagSize         = 16
+	PlaintextSize   = 39                                                        // sizeof(LogRecordPlaintext)
+	EnvelopeSize    = 1 + NonceSize + LengthFieldSize + PlaintextSize + TagSize // 70
+	KeySize         = 32                                                        // AES-256
 )
 
 var (
-	ErrShortFrame = errors.New("cipher: truncated frame")
-	ErrBadKeyLen  = errors.New("cipher: key must decode to 32 bytes")
+	ErrShortFrame         = errors.New("cipher: truncated envelope")
+	ErrBadKeyLen          = errors.New("cipher: key must decode to 32 bytes")
+	ErrUnsupportedVersion = errors.New("cipher: unsupported log format version")
+	ErrBadLength          = errors.New("cipher: envelope ciphertext length does not match plaintext size")
 )
 
 // DeriveKey turns an arbitrary passphrase into a 32-byte AES-256 key via
-// SHA-256. The key is only ever held in memory for the lifetime of the
-// decryption session and is never written to disk.
+// SHA-256. Prefer the device's own 64-hex-char key (Settings -> Reveal log
+// key) over a passphrase where possible — Ruby derives its key from
+// hardware TRNG + eFuse MAC, not from a human-chosen passphrase.
 func DeriveKey(passphrase []byte) [KeySize]byte {
 	return sha256.Sum256(passphrase)
 }
@@ -56,23 +65,31 @@ func NewSession(key [KeySize]byte) (*Session, error) {
 	return &Session{gcm: gcm}, nil
 }
 
-// DecryptFrame authenticates and decrypts one 44-byte on-disk frame,
-// returning the 16-byte plaintext record.
-func (s *Session) DecryptFrame(frame []byte) ([]byte, error) {
-	if len(frame) != FrameSize {
+// DecryptEnvelope authenticates and decrypts one EnvelopeSize-byte on-disk
+// envelope, returning the PlaintextSize-byte plaintext record.
+func (s *Session) DecryptEnvelope(envelope []byte) ([]byte, error) {
+	if len(envelope) != EnvelopeSize {
 		return nil, ErrShortFrame
 	}
-	nonce := frame[:NonceSize]
-	ciphertext := frame[NonceSize:] // 16-byte record + 16-byte tag
-	return s.gcm.Open(nil, nonce, ciphertext, nil)
+	version := envelope[0]
+	if version != FormatVersion {
+		return nil, ErrUnsupportedVersion
+	}
+	nonce := envelope[1 : 1+NonceSize]
+	ctLen := binary.LittleEndian.Uint16(envelope[1+NonceSize : 1+NonceSize+LengthFieldSize])
+	if ctLen != PlaintextSize {
+		return nil, ErrBadLength
+	}
+	rest := envelope[1+NonceSize+LengthFieldSize:] // ciphertext + tag
+	return s.gcm.Open(nil, nonce, rest, nil)
 }
 
-// DecryptStream reads fixed-width frames from r and invokes fn with each
-// decrypted 16-byte plaintext record in order. It stops at EOF and returns
-// nil, or returns the first error encountered (including authentication
-// failures, which indicate a wrong key or corrupted log).
+// DecryptStream reads fixed-width envelopes from r and invokes fn with each
+// decrypted plaintext record in order. It stops at EOF and returns nil, or
+// returns the first error encountered (including authentication failures,
+// which indicate a wrong key or corrupted log).
 func (s *Session) DecryptStream(r io.Reader, fn func(record []byte) error) error {
-	buf := make([]byte, FrameSize)
+	buf := make([]byte, EnvelopeSize)
 	for {
 		_, err := io.ReadFull(r, buf)
 		if err == io.EOF {
@@ -84,7 +101,7 @@ func (s *Session) DecryptStream(r io.Reader, fn func(record []byte) error) error
 		if err != nil {
 			return err
 		}
-		record, err := s.DecryptFrame(buf)
+		record, err := s.DecryptEnvelope(buf)
 		if err != nil {
 			return err
 		}

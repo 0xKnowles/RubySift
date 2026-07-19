@@ -1,5 +1,5 @@
 // Command rubysift runs the RubySift desktop companion: a loopback-only
-// local server that decrypts Ruby's .rub telemetry logs in memory and
+// local server that decrypts Ruby's .pclog telemetry logs in memory and
 // serves the analytics dashboard.
 package main
 

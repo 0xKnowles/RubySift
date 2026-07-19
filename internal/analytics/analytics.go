@@ -20,9 +20,6 @@ type PulseBucket struct {
 func PulseGrid(records []parser.Record) []PulseBucket {
 	buckets := make([]int, 24)
 	for _, r := range records {
-		if r.Type == parser.RecordCompanionState {
-			continue
-		}
 		hour := int((r.Timestamp / 3600) % 24)
 		buckets[hour]++
 	}
@@ -38,6 +35,7 @@ func PulseGrid(records []parser.Record) []PulseBucket {
 type ProximityCluster struct {
 	MAC       string  `json:"mac"`
 	Type      string  `json:"type"`
+	Label     string  `json:"label"` // most recently seen SSID/BLE name, if any
 	Sightings int     `json:"sightings"`
 	AvgRSSI   float64 `json:"avg_rssi"`
 	MaxRSSI   int     `json:"max_rssi"`
@@ -50,6 +48,7 @@ type ProximityCluster struct {
 func ProximityClusters(records []parser.Record) []ProximityCluster {
 	type acc struct {
 		typeName    string
+		label       string
 		count       int
 		rssiSum     int
 		maxRSSI     int
@@ -57,9 +56,6 @@ func ProximityClusters(records []parser.Record) []ProximityCluster {
 	}
 	byMAC := make(map[string]*acc)
 	for _, r := range records {
-		if r.Type == parser.RecordCompanionState {
-			continue
-		}
 		a, ok := byMAC[r.MAC]
 		if !ok {
 			a = &acc{typeName: r.TypeName, maxRSSI: int(r.RSSI), first: r.Timestamp, last: r.Timestamp}
@@ -73,8 +69,11 @@ func ProximityClusters(records []parser.Record) []ProximityCluster {
 		if r.Timestamp < a.first {
 			a.first = r.Timestamp
 		}
-		if r.Timestamp > a.last {
+		if r.Timestamp >= a.last {
 			a.last = r.Timestamp
+			if r.Label != "" {
+				a.label = r.Label
+			}
 		}
 	}
 	out := make([]ProximityCluster, 0, len(byMAC))
@@ -82,6 +81,7 @@ func ProximityClusters(records []parser.Record) []ProximityCluster {
 		out = append(out, ProximityCluster{
 			MAC:       mac,
 			Type:      a.typeName,
+			Label:     a.label,
 			Sightings: a.count,
 			AvgRSSI:   float64(a.rssiSum) / float64(a.count),
 			MaxRSSI:   a.maxRSSI,
