@@ -125,6 +125,10 @@ func (s *Server) handleUsbList(w http.ResponseWriter, r *http.Request) {
 type usbPullRequest struct {
 	Port string `json:"port"`
 	Name string `json:"name"`
+	// Size is the file's size as already reported by a prior List() call (the frontend has it
+	// from rendering the file picker) — used only for Get()'s progress reporting, not correctness;
+	// the device's own chunk responses are what actually determine when the transfer is done.
+	Size uint32 `json:"size"`
 	// Key is optional: if empty, the device's own key is fetched over the same USB connection
 	// (Client.Key()) rather than requiring it typed in — physical possession is already
 	// established by the fact that a live USB Transfer connection exists at all.
@@ -170,7 +174,7 @@ func (s *Server) handleUsbPull(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var err error
-		data, err = client.Get(req.Name)
+		data, err = client.Get(req.Name, req.Size)
 		return err
 	})
 	if err != nil {

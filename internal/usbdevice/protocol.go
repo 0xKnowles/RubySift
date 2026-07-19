@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	headerSize      = 4 + 1 + 4 // magic + opcode + length
-	maxFilenameLen  = 127
-	defaultReadSize = 512
+	headerSize     = 4 + 1 + 4 // magic + opcode + length
+	maxFilenameLen = 127
 )
 
 var magic = [4]byte{'R', 'B', 'Y', '1'}

@@ -52,8 +52,8 @@ func Open(portName string) (*Client, error) {
 	}
 	// Applies per underlying Read() call, not to the overall exchange — io.ReadFull loops calling
 	// Read until it has everything, so this only trips if a single Read goes this long without any
-	// new byte arriving. Get() can stream a multi-megabyte .pclog in 512-byte chunks straight off
-	// the SD card, and an occasional slow card read shouldn't spuriously fail the whole transfer.
+	// new byte arriving. Generous relative to how long even a full chunkSize read should ever take,
+	// so an occasional slow SD card read on the device's end doesn't spuriously fail a chunk.
 	if err := port.SetReadTimeout(30 * time.Second); err != nil {
 		port.Close()
 		return nil, fmt.Errorf("usbdevice: setting read timeout: %w", err)
@@ -138,13 +138,76 @@ func (c *Client) List() ([]FileInfo, error) {
 	return files, nil
 }
 
-// Get fetches one file's raw bytes by name (no directory prefix).
-func (c *Client) Get(name string) ([]byte, error) {
+// chunkSize is how many bytes Get requests per exchange. Must match the firmware's kMaxChunkSize
+// (UsbTransferProtocol.h) — not enforced by the wire format, kept in lockstep by hand like the
+// rest of this protocol.
+const chunkSize = 65536
+
+// Get fetches one file's raw bytes by name (no directory prefix), pulling it in bounded chunkSize
+// exchanges rather than one continuous burst.
+//
+// This replaced a single-request design after real-hardware testing: streaming a whole multi-
+// megabyte .pclog as one kOpGetOk payload reliably lost a growing tail of it before EOF, no matter
+// how many stronger guarantees (short-write retry, flush, an end-of-transfer ack) got added around
+// that one exchange — see the firmware's CHANGELOG. Bounding each exchange to chunkSize keeps any
+// one write small enough that this stopped reproducing in testing, and confines a lost chunk to
+// one retry instead of losing the last mile of a huge transfer.
+//
+// expectedSize is only used for progress reporting (percentage/rate) — the device tells us
+// authoritatively that we've reached EOF by returning a chunk shorter than requested, independent
+// of whatever expectedSize says.
+func (c *Client) Get(name string, expectedSize uint32) ([]byte, error) {
 	if len(name) == 0 || len(name) > maxFilenameLen {
 		return nil, fmt.Errorf("usbdevice: filename length must be 1-%d bytes", maxFilenameLen)
 	}
+
+	var data []byte
+	offset := uint32(0)
+	start := time.Now()
+	lastLog := start
+
+	for {
+		chunk, err := c.getChunk(name, offset)
+		if err != nil {
+			return nil, fmt.Errorf("usbdevice: reading chunk at offset %d: %w", offset, err)
+		}
+		data = append(data, chunk...)
+		offset += uint32(len(chunk))
+
+		if time.Since(lastLog) >= 2*time.Second {
+			elapsed := time.Since(start).Seconds()
+			rate := float64(offset) / 1024 / elapsed
+			pctStr := "?%"
+			if expectedSize > 0 {
+				pctStr = fmt.Sprintf("%.0f%%", 100*float64(offset)/float64(expectedSize))
+			}
+			log.Printf("usbdevice: pulling %s: %d/%d bytes (%s, %.1f KB/s)", name, offset, expectedSize, pctStr, rate)
+			lastLog = time.Now()
+		}
+
+		if uint32(len(chunk)) < chunkSize {
+			// Short of what we asked for -- the device clamps to what's actually left in the
+			// file, so this is EOF, not an error.
+			break
+		}
+	}
+
+	log.Printf("usbdevice: pulled %s: %d bytes in %.1fs", name, offset, time.Since(start).Seconds())
+	return data, nil
+}
+
+// getChunk fetches up to chunkSize bytes of name starting at offset, acking receipt once the
+// device's response is fully read (the device blocks waiting for this -- see
+// UsbTransferActivity::waitForGetAck -- since neither a successful write() nor flush() on its side
+// proves the host actually has the bytes yet).
+func (c *Client) getChunk(name string, offset uint32) ([]byte, error) {
+	payload := make([]byte, 8+len(name))
+	binary.LittleEndian.PutUint32(payload[0:4], offset)
+	binary.LittleEndian.PutUint32(payload[4:8], chunkSize)
+	copy(payload[8:], name)
+
 	c.discardStaleInput()
-	if err := writeFrame(c.port, opGet, []byte(name)); err != nil {
+	if err := writeFrame(c.port, opGet, payload); err != nil {
 		return nil, err
 	}
 	op, length, err := readFrameHeader(c.port)
@@ -158,59 +221,16 @@ func (c *Client) Get(name string) ([]byte, error) {
 		return nil, fmt.Errorf("usbdevice: expected get-ok, got opcode 0x%02x", op)
 	}
 
-	data := make([]byte, length)
-	if err := readWithProgress(c.port, data, name); err != nil {
-		return nil, fmt.Errorf("usbdevice: reading file body: %w", err)
+	chunk := make([]byte, length)
+	if _, err := io.ReadFull(c.port, chunk); err != nil {
+		return nil, fmt.Errorf("usbdevice: reading chunk body: %w", err)
 	}
 
-	// The device blocks (see UsbTransferActivity::waitForGetAck) waiting for this before it
-	// considers the transfer done. Necessary on real hardware even with the device retrying short
-	// writes and flushing its USB CDC buffer: neither proves the host actually has the bytes yet,
-	// only that the device's own side let go of them. Best-effort -- if this write fails the device
-	// will just time out its own wait and move on, no worse off than before this existed.
+	// Best-effort -- if this write fails the device will just time out its own wait and move on;
+	// the caller sees whatever error (or none) getChunk itself already returned.
 	_ = writeFrame(c.port, opGetAck, nil)
 
-	return data, nil
-}
-
-// stallLimit bounds how long readWithProgress will wait without any forward progress at all
-// before giving up. A per-Read timeout alone doesn't catch this: go.bug.st/serial returns (0, nil)
-// on an individual read timing out, so a device that has stopped sending entirely (rather than
-// erroring) would otherwise leave this looping — and the request hanging — forever.
-const stallLimit = 90 * time.Second
-
-// readWithProgress fills buf completely, logging periodic progress to stderr. A multi-megabyte
-// .pclog over a serial link can take long enough that silence is indistinguishable from a hang —
-// this is the only feedback for that stretch (the browser just shows an unchanging "Pulling...").
-func readWithProgress(r io.Reader, buf []byte, label string) error {
-	const logInterval = 2 * time.Second
-	start := time.Now()
-	lastLog := start
-	lastProgress := start
-	total := 0
-	for total < len(buf) {
-		n, err := r.Read(buf[total:])
-		if n > 0 {
-			total += n
-			lastProgress = time.Now()
-		}
-		if err != nil {
-			return err
-		}
-		if time.Since(lastProgress) >= stallLimit {
-			return fmt.Errorf("usbdevice: stalled at %d/%d bytes (%s), no progress for %s", total, len(buf), label,
-				stallLimit)
-		}
-		if time.Since(lastLog) >= logInterval {
-			elapsed := time.Since(start).Seconds()
-			pct := 100 * float64(total) / float64(len(buf))
-			rate := float64(total) / 1024 / elapsed
-			log.Printf("usbdevice: pulling %s: %d/%d bytes (%.0f%%, %.1f KB/s)", label, total, len(buf), pct, rate)
-			lastLog = time.Now()
-		}
-	}
-	log.Printf("usbdevice: pulled %s: %d bytes in %.1fs", label, total, time.Since(start).Seconds())
-	return nil
+	return chunk, nil
 }
 
 // Key fetches the device's 64-hex-char AES-256 decryption key. Reachable only because we already

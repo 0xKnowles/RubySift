@@ -1,6 +1,7 @@
 package usbdevice
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"io"
@@ -137,8 +138,22 @@ func TestClientGet(t *testing.T) {
 		if op != opGet {
 			t.Errorf("device saw opcode 0x%02x, want opGet", op)
 		}
-		if string(payload) != "20260717.pclog" {
-			t.Errorf("device saw filename %q", payload)
+		// payload = [4B offset LE][4B length LE][filename]
+		if len(payload) < 8 {
+			t.Errorf("get request payload too short: %d bytes", len(payload))
+			return
+		}
+		offset := binary.LittleEndian.Uint32(payload[0:4])
+		length := binary.LittleEndian.Uint32(payload[4:8])
+		name := string(payload[8:])
+		if offset != 0 {
+			t.Errorf("device saw offset %d, want 0", offset)
+		}
+		if length != chunkSize {
+			t.Errorf("device saw requested length %d, want %d", length, chunkSize)
+		}
+		if name != "20260717.pclog" {
+			t.Errorf("device saw filename %q", name)
 		}
 		device.sendFrame(opGetOk, want)
 
@@ -151,13 +166,56 @@ func TestClientGet(t *testing.T) {
 		}
 	}()
 
-	got, err := client.Get("20260717.pclog")
+	// want is far shorter than chunkSize, so the device's single short reply signals EOF and Get
+	// returns after exactly one chunk exchange.
+	got, err := client.Get("20260717.pclog", uint32(len(want)))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	<-done
 	if string(got) != string(want) {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestClientGetMultipleChunks(t *testing.T) {
+	client, device := newFakeDevice(t)
+	// Two full-size chunks plus a short final one, so Get() must issue three requests before
+	// recognizing EOF from the last (short) response.
+	chunk1 := bytes.Repeat([]byte{0xAA}, chunkSize)
+	chunk2 := bytes.Repeat([]byte{0xBB}, chunkSize)
+	chunk3 := []byte("tail")
+	want := append(append(append([]byte{}, chunk1...), chunk2...), chunk3...)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wantOffset := uint32(0)
+		for _, chunk := range [][]byte{chunk1, chunk2, chunk3} {
+			op, payload := device.recvFrame()
+			if op != opGet {
+				t.Errorf("device saw opcode 0x%02x, want opGet", op)
+			}
+			offset := binary.LittleEndian.Uint32(payload[0:4])
+			if offset != wantOffset {
+				t.Errorf("device saw offset %d, want %d", offset, wantOffset)
+			}
+			wantOffset += uint32(len(chunk))
+			device.sendFrame(opGetOk, chunk)
+			ackOp, _ := device.recvFrame()
+			if ackOp != opGetAck {
+				t.Errorf("device saw opcode 0x%02x after Get, want opGetAck", ackOp)
+			}
+		}
+	}()
+
+	got, err := client.Get("big.pclog", uint32(len(want)))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	<-done
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %d bytes, want %d bytes (mismatch)", len(got), len(want))
 	}
 }
 
@@ -170,7 +228,7 @@ func TestClientGetNotFound(t *testing.T) {
 		device.sendFrame(opErr, []byte("file not found"))
 	}()
 
-	_, err := client.Get("nope.pclog")
+	_, err := client.Get("nope.pclog", 0)
 	<-done
 	if err == nil {
 		t.Fatal("expected an error for a missing file")
@@ -208,7 +266,7 @@ func TestClientGetRejectsOverlongFilename(t *testing.T) {
 	for i := range longName {
 		longName[i] = 'a'
 	}
-	if _, err := client.Get(string(longName)); err == nil {
+	if _, err := client.Get(string(longName), 0); err == nil {
 		t.Fatal("expected an error for an overlong filename")
 	}
 }

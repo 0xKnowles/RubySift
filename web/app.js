@@ -122,19 +122,22 @@ usbBrowseBtn.addEventListener(
       const pullBtn = document.createElement("button");
       pullBtn.type = "button";
       pullBtn.textContent = "Pull & Decrypt";
-      pullBtn.addEventListener("click", withUsbBusy([pullBtn], "Pulling...", () => pullUsbFile(port, f.name)));
+      pullBtn.addEventListener(
+        "click",
+        withUsbBusy([pullBtn], "Pulling...", () => pullUsbFile(port, f.name, f.size))
+      );
       li.appendChild(pullBtn);
       list.appendChild(li);
     }
   })
 );
 
-async function pullUsbFile(port, name) {
+async function pullUsbFile(port, name, size) {
   usbError.textContent = "";
   const res = await fetch("/api/usb/pull", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ port, name }),
+    body: JSON.stringify({ port, name, size }),
   });
   const data = await res.json();
   if (!res.ok) {
