@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"go.bug.st/serial"
@@ -158,10 +159,36 @@ func (c *Client) Get(name string) ([]byte, error) {
 	}
 
 	data := make([]byte, length)
-	if _, err := io.ReadFull(c.port, data); err != nil {
+	if err := readWithProgress(c.port, data, name); err != nil {
 		return nil, fmt.Errorf("usbdevice: reading file body: %w", err)
 	}
 	return data, nil
+}
+
+// readWithProgress fills buf completely, logging periodic progress to stderr. A multi-megabyte
+// .pclog over a serial link can take long enough that silence is indistinguishable from a hang —
+// this is the only feedback for that stretch (the browser just shows an unchanging "Pulling...").
+func readWithProgress(r io.Reader, buf []byte, label string) error {
+	const logInterval = 2 * time.Second
+	start := time.Now()
+	lastLog := start
+	total := 0
+	for total < len(buf) {
+		n, err := r.Read(buf[total:])
+		total += n
+		if err != nil {
+			return err
+		}
+		if time.Since(lastLog) >= logInterval {
+			elapsed := time.Since(start).Seconds()
+			pct := 100 * float64(total) / float64(len(buf))
+			rate := float64(total) / 1024 / elapsed
+			log.Printf("usbdevice: pulling %s: %d/%d bytes (%.0f%%, %.1f KB/s)", label, total, len(buf), pct, rate)
+			lastLog = time.Now()
+		}
+	}
+	log.Printf("usbdevice: pulled %s: %d bytes in %.1fs", label, total, time.Since(start).Seconds())
+	return nil
 }
 
 // Key fetches the device's 64-hex-char AES-256 decryption key. Reachable only because we already
