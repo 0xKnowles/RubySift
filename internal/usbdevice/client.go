@@ -62,8 +62,27 @@ func Open(portName string) (*Client, error) {
 
 func (c *Client) Close() error { return c.port.Close() }
 
+// inputFlusher is satisfied by the real serial.Port (not by the io.ReadWriteCloser test fakes,
+// which have nothing to flush).
+type inputFlusher interface {
+	ResetInputBuffer() error
+}
+
+// discardStaleInput drops any bytes already sitting in the OS's serial receive buffer before we
+// write a new request. Confirmed necessary on real hardware: the device's own request counter
+// kept incrementing normally (never crashed, never left UsbTransferActivity) while the host still
+// read back "bad magic" -- meaning an earlier request's response, or some other leftover bytes,
+// were sitting unread ahead of the next request's actual response. Every protocol method starts
+// clean now instead of trusting that the last exchange left nothing behind.
+func (c *Client) discardStaleInput() {
+	if f, ok := c.port.(inputFlusher); ok {
+		_ = f.ResetInputBuffer()
+	}
+}
+
 // Ping verifies the device is connected and has UsbTransferActivity open.
 func (c *Client) Ping() error {
+	c.discardStaleInput()
 	if err := writeFrame(c.port, opPing, nil); err != nil {
 		return err
 	}
@@ -79,6 +98,7 @@ func (c *Client) Ping() error {
 
 // List returns every file in the device's log directory.
 func (c *Client) List() ([]FileInfo, error) {
+	c.discardStaleInput()
 	if err := writeFrame(c.port, opList, nil); err != nil {
 		return nil, err
 	}
@@ -122,6 +142,7 @@ func (c *Client) Get(name string) ([]byte, error) {
 	if len(name) == 0 || len(name) > maxFilenameLen {
 		return nil, fmt.Errorf("usbdevice: filename length must be 1-%d bytes", maxFilenameLen)
 	}
+	c.discardStaleInput()
 	if err := writeFrame(c.port, opGet, []byte(name)); err != nil {
 		return nil, err
 	}
@@ -148,6 +169,7 @@ func (c *Client) Get(name string) ([]byte, error) {
 // key off the device's own Settings screen.
 func (c *Client) Key() ([32]byte, error) {
 	var key [32]byte
+	c.discardStaleInput()
 	if err := writeFrame(c.port, opKey, nil); err != nil {
 		return key, err
 	}
