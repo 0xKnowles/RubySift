@@ -22,8 +22,11 @@ func ListPorts() ([]string, error) {
 	return ports, nil
 }
 
-// Client is a short-lived connection to one Ruby device's USB Transfer screen. Open one, make one
-// or two calls, Close it — this is not meant to be held open across a whole app session.
+// Client is a connection to one Ruby device's USB Transfer screen. Callers are expected to reuse
+// one Client across multiple List/Get/Key calls rather than reopening per call — see
+// internal/server/usb.go's usbConn, which holds one open for as long as the dashboard's USB
+// session lasts, both for efficiency and because repeated open/close cycles were observed
+// resetting the device (see Open's comment).
 //
 // port is io.ReadWriteCloser rather than the concrete serial.Port so tests can drive the protocol
 // logic against an in-memory fake instead of real hardware.
@@ -46,7 +49,11 @@ func Open(portName string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("usbdevice: opening %s: %w", portName, err)
 	}
-	if err := port.SetReadTimeout(5 * time.Second); err != nil {
+	// Applies per underlying Read() call, not to the overall exchange — io.ReadFull loops calling
+	// Read until it has everything, so this only trips if a single Read goes this long without any
+	// new byte arriving. Get() can stream a multi-megabyte .pclog in 512-byte chunks straight off
+	// the SD card, and an occasional slow card read shouldn't spuriously fail the whole transfer.
+	if err := port.SetReadTimeout(30 * time.Second); err != nil {
 		port.Close()
 		return nil, fmt.Errorf("usbdevice: setting read timeout: %w", err)
 	}
