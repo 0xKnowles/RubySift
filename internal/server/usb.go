@@ -17,41 +17,55 @@ import (
 // This matters beyond efficiency: closing a serial port commonly drops DTR as a "hang up" signal,
 // and plenty of ESP32 boards (including native-USB C3 boards, for esptool's auto-reset trick) wire
 // DTR to EN/reset. Opening and closing a connection per request was observed resetting the device
-// out of UsbTransferActivity between calls (e.g. List succeeding, then Pull's fresh connection
-// landing on a device that had already rebooted back to normal, unmuted logging — visible as
-// "bad magic" errors containing what's obviously a log line, not a protocol frame). Keeping one
-// connection open for the whole USB session avoids the extra close/reopen cycles that trigger it.
+// out of UsbTransferActivity between calls. Keeping one connection open for the whole USB session
+// avoids the extra close/reopen cycles that trigger it.
+//
+// mu guards the entire duration of each Do() call, not just opening/replacing the client — the
+// protocol is a strict request/response exchange over one shared wire, so two HTTP requests
+// racing to use it concurrently (e.g. a double-click) can interleave their writes and reads and
+// each read back the other's response. That was observed directly: a List call's response reader
+// once received a genuine, well-formed kOpKeyOk frame — the previous request's answer, not
+// corruption — because both requests' Client method calls were running unsynchronized on the same
+// port at once.
 type usbConn struct {
 	mu     sync.Mutex
 	port   string
 	client *usbdevice.Client
 }
 
-// ensure returns the live client for port, opening a new connection if none exists yet or the
-// caller asked for a different port than the one currently held.
-func (u *usbConn) ensure(port string) (*usbdevice.Client, error) {
+// Do runs fn against the live client for port under an exclusive lock held for fn's entire
+// duration, opening a new connection first if none exists yet or the caller asked for a different
+// port than the one currently held. If fn returns an error, the connection is closed and forgotten
+// — a connection that errored mid-exchange isn't safe to reuse — so the next Do() call reopens
+// cleanly rather than reading whatever is left over on the wire.
+func (u *usbConn) Do(port string, fn func(*usbdevice.Client) error) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	if u.client != nil && u.port == port {
-		return u.client, nil
+	if u.client == nil || u.port != port {
+		if u.client != nil {
+			u.client.Close()
+			u.client = nil
+			u.port = ""
+		}
+		client, err := usbdevice.Open(port)
+		if err != nil {
+			return err
+		}
+		u.client = client
+		u.port = port
 	}
-	if u.client != nil {
+
+	if err := fn(u.client); err != nil {
 		u.client.Close()
 		u.client = nil
+		u.port = ""
+		return err
 	}
-
-	client, err := usbdevice.Open(port)
-	if err != nil {
-		return nil, err
-	}
-	u.client = client
-	u.port = port
-	return client, nil
+	return nil
 }
 
-// drop closes and forgets the current connection, used when a request on it fails — a broken
-// connection isn't worth reusing, and the next request will reopen cleanly.
+// drop closes and forgets the current connection, if any.
 func (u *usbConn) drop() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -95,15 +109,13 @@ func (s *Server) handleUsbList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := s.usb.ensure(req.Port)
+	var files []usbdevice.FileInfo
+	err := s.usb.Do(req.Port, func(client *usbdevice.Client) error {
+		var err error
+		files, err = client.List()
+		return err
+	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	files, err := client.List()
-	if err != nil {
-		s.usb.drop()
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -134,12 +146,6 @@ func (s *Server) handleUsbPull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := s.usb.ensure(req.Port)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
 	var key [cipher.KeySize]byte
 	if req.Key != "" {
 		raw, err := hex.DecodeString(req.Key)
@@ -148,19 +154,26 @@ func (s *Server) handleUsbPull(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		copy(key[:], raw)
-	} else {
-		key, err = client.Key()
-		if err != nil {
-			s.usb.drop()
-			writeError(w, http.StatusBadGateway, fmt.Errorf("fetching device key: %w", err).Error())
-			return
-		}
 	}
 	defer zero(key[:])
 
-	data, err := client.Get(req.Name)
+	// Key() and Get() run as one atomic exchange under usb.Do's lock — if a request supplying its
+	// own key only needed Get(), a concurrent request could otherwise interleave a Key() call
+	// between our two device round trips.
+	var data []byte
+	err := s.usb.Do(req.Port, func(client *usbdevice.Client) error {
+		if req.Key == "" {
+			var err error
+			key, err = client.Key()
+			if err != nil {
+				return fmt.Errorf("fetching device key: %w", err)
+			}
+		}
+		var err error
+		data, err = client.Get(req.Name)
+		return err
+	})
 	if err != nil {
-		s.usb.drop()
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}

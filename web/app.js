@@ -61,41 +61,73 @@ async function refreshUsbPorts() {
 document.getElementById("usb-refresh").addEventListener("click", refreshUsbPorts);
 refreshUsbPorts();
 
-document.getElementById("usb-browse").addEventListener("click", async () => {
-  usbError.textContent = "";
-  const port = document.getElementById("usb-port").value;
-  const list = document.getElementById("usb-files");
-  list.innerHTML = "";
-  if (!port) {
-    usbError.textContent = "Select a serial port first";
-    return;
-  }
+// The device only ever talks one request/response exchange at a time over one shared serial
+// connection — a double-click (or clicking List again while a Pull is still in flight) can send
+// two overlapping requests that each read back the other's response. The server now serializes
+// actual device exchanges regardless, but disabling the buttons while a request is outstanding
+// avoids relying on that alone, and gives clearer feedback than the button silently doing nothing.
+let usbBusy = false;
 
-  const res = await fetch("/api/usb/list", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ port }),
-  });
-  const files = await res.json();
-  if (!res.ok) {
-    usbError.textContent = files.error || "failed to list device files";
-    return;
-  }
-  if (!files || files.length === 0) {
-    list.innerHTML = "<li>No .pclog files on device.</li>";
-    return;
-  }
-  for (const f of files) {
-    const li = document.createElement("li");
-    li.innerHTML = `<span>${f.name} (${f.size} bytes)</span>`;
-    const pullBtn = document.createElement("button");
-    pullBtn.type = "button";
-    pullBtn.textContent = "Pull & Decrypt";
-    pullBtn.addEventListener("click", () => pullUsbFile(port, f.name));
-    li.appendChild(pullBtn);
-    list.appendChild(li);
-  }
-});
+function withUsbBusy(buttons, label, fn) {
+  return async (...args) => {
+    if (usbBusy) return;
+    usbBusy = true;
+    const originalLabels = buttons.map((b) => b.textContent);
+    buttons.forEach((b) => {
+      b.disabled = true;
+      if (label) b.textContent = label;
+    });
+    try {
+      await fn(...args);
+    } finally {
+      usbBusy = false;
+      buttons.forEach((b, i) => {
+        b.disabled = false;
+        b.textContent = originalLabels[i];
+      });
+    }
+  };
+}
+
+const usbBrowseBtn = document.getElementById("usb-browse");
+usbBrowseBtn.addEventListener(
+  "click",
+  withUsbBusy([usbBrowseBtn], "Listing...", async () => {
+    usbError.textContent = "";
+    const port = document.getElementById("usb-port").value;
+    const list = document.getElementById("usb-files");
+    list.innerHTML = "";
+    if (!port) {
+      usbError.textContent = "Select a serial port first";
+      return;
+    }
+
+    const res = await fetch("/api/usb/list", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port }),
+    });
+    const files = await res.json();
+    if (!res.ok) {
+      usbError.textContent = files.error || "failed to list device files";
+      return;
+    }
+    if (!files || files.length === 0) {
+      list.innerHTML = "<li>No .pclog files on device.</li>";
+      return;
+    }
+    for (const f of files) {
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${f.name} (${f.size} bytes)</span>`;
+      const pullBtn = document.createElement("button");
+      pullBtn.type = "button";
+      pullBtn.textContent = "Pull & Decrypt";
+      pullBtn.addEventListener("click", withUsbBusy([pullBtn], "Pulling...", () => pullUsbFile(port, f.name)));
+      li.appendChild(pullBtn);
+      list.appendChild(li);
+    }
+  })
+);
 
 async function pullUsbFile(port, name) {
   usbError.textContent = "";
