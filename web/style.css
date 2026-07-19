@@ -63,7 +63,7 @@ input {
   width: 100%;
   margin-top: 0.35rem;
   padding: 0.5rem 0.6rem;
-  background: #0b0d12;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
@@ -87,11 +87,19 @@ select {
   width: 100%;
   margin-top: 0.35rem;
   padding: 0.5rem 0.6rem;
-  background: #0b0d12;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
   font-size: 0.9rem;
+}
+
+/* Some browsers render the <option> popup with its own defaults instead of inheriting the
+   <select>'s color/background, which is what actually made this unreadable (dark-on-dark or
+   light-on-light) regardless of the fix above — set both explicitly on the options themselves. */
+select option {
+  background: var(--bg);
+  color: var(--text);
 }
 
 .usb-row {
@@ -165,5 +173,4 @@ th { color: var(--muted); font-weight: 500; }
     --text: #1a1c22;
     --muted: #666d7d;
   }
-  input { background: #f7f7fb; }
 }

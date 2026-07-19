@@ -33,7 +33,16 @@ type Client struct {
 
 // Open connects to the serial port at the given path (e.g. "/dev/ttyACM0", "COM5").
 func Open(portName string) (*Client, error) {
-	port, err := serial.Open(portName, &serial.Mode{BaudRate: 115200})
+	// go.bug.st/serial defaults InitialStatusBits to DTR=true, RTS=true when left nil. Plenty of
+	// ESP32 boards — including native-USB C3 boards, for esptool's auto-reset-into-bootloader
+	// trick — wire those lines to EN/IO0, so asserting them on open can reset the chip out from
+	// under UsbTransferActivity the moment we connect. Deasserted here so opening the port never
+	// touches the device's reset/boot-mode pins.
+	mode := &serial.Mode{
+		BaudRate:          115200,
+		InitialStatusBits: &serial.ModemOutputBits{DTR: false, RTS: false},
+	}
+	port, err := serial.Open(portName, mode)
 	if err != nil {
 		return nil, fmt.Errorf("usbdevice: opening %s: %w", portName, err)
 	}
