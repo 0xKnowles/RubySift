@@ -30,6 +30,7 @@ document.getElementById("open-form").addEventListener("submit", async (e) => {
 
 document.getElementById("close-session").addEventListener("click", async () => {
   await fetch("/api/session/close", { method: "POST" });
+  await fetch("/api/usb/disconnect", { method: "POST" });
   dashboard.hidden = true;
   gate.hidden = false;
   usbGate.hidden = false;

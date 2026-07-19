@@ -38,10 +38,11 @@ func (s *Session) reset() {
 type Server struct {
 	mux     *http.ServeMux
 	session *Session
+	usb     *usbConn
 }
 
 func New(assets http.FileSystem) *Server {
-	s := &Server{mux: http.NewServeMux(), session: &Session{}}
+	s := &Server{mux: http.NewServeMux(), session: &Session{}, usb: &usbConn{}}
 	s.routes(assets)
 	return s
 }
@@ -59,6 +60,7 @@ func (s *Server) routes(assets http.FileSystem) {
 	s.mux.HandleFunc("/api/usb/ports", s.handleUsbPorts)
 	s.mux.HandleFunc("/api/usb/list", s.handleUsbList)
 	s.mux.HandleFunc("/api/usb/pull", s.handleUsbPull)
+	s.mux.HandleFunc("/api/usb/disconnect", s.handleUsbDisconnect)
 }
 
 type openRequest struct {
