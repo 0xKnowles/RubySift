@@ -1,6 +1,8 @@
 const gate = document.getElementById("gate");
+const usbGate = document.getElementById("usb-gate");
 const dashboard = document.getElementById("dashboard");
 const gateError = document.getElementById("gate-error");
+const usbError = document.getElementById("usb-error");
 
 document.getElementById("open-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -21,6 +23,7 @@ document.getElementById("open-form").addEventListener("submit", async (e) => {
   }
   document.getElementById("secret").value = "";
   gate.hidden = true;
+  usbGate.hidden = true;
   dashboard.hidden = false;
   await loadDashboard();
 });
@@ -29,7 +32,87 @@ document.getElementById("close-session").addEventListener("click", async () => {
   await fetch("/api/session/close", { method: "POST" });
   dashboard.hidden = true;
   gate.hidden = false;
+  usbGate.hidden = false;
 });
+
+async function refreshUsbPorts() {
+  usbError.textContent = "";
+  const select = document.getElementById("usb-port");
+  select.innerHTML = "";
+  try {
+    const ports = await fetch("/api/usb/ports").then((r) => r.json());
+    for (const port of ports || []) {
+      const opt = document.createElement("option");
+      opt.value = port;
+      opt.textContent = port;
+      select.appendChild(opt);
+    }
+    if (!ports || ports.length === 0) {
+      const opt = document.createElement("option");
+      opt.textContent = "No serial ports found";
+      select.appendChild(opt);
+    }
+  } catch {
+    usbError.textContent = "Failed to list serial ports";
+  }
+}
+
+document.getElementById("usb-refresh").addEventListener("click", refreshUsbPorts);
+refreshUsbPorts();
+
+document.getElementById("usb-browse").addEventListener("click", async () => {
+  usbError.textContent = "";
+  const port = document.getElementById("usb-port").value;
+  const list = document.getElementById("usb-files");
+  list.innerHTML = "";
+  if (!port) {
+    usbError.textContent = "Select a serial port first";
+    return;
+  }
+
+  const res = await fetch("/api/usb/list", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ port }),
+  });
+  const files = await res.json();
+  if (!res.ok) {
+    usbError.textContent = files.error || "failed to list device files";
+    return;
+  }
+  if (!files || files.length === 0) {
+    list.innerHTML = "<li>No .pclog files on device.</li>";
+    return;
+  }
+  for (const f of files) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${f.name} (${f.size} bytes)</span>`;
+    const pullBtn = document.createElement("button");
+    pullBtn.type = "button";
+    pullBtn.textContent = "Pull & Decrypt";
+    pullBtn.addEventListener("click", () => pullUsbFile(port, f.name));
+    li.appendChild(pullBtn);
+    list.appendChild(li);
+  }
+});
+
+async function pullUsbFile(port, name) {
+  usbError.textContent = "";
+  const res = await fetch("/api/usb/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ port, name }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    usbError.textContent = data.error || "failed to pull file";
+    return;
+  }
+  gate.hidden = true;
+  usbGate.hidden = true;
+  dashboard.hidden = false;
+  await loadDashboard();
+}
 
 async function loadDashboard() {
   const [pulse, proximity] = await Promise.all([

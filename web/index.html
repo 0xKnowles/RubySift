@@ -27,6 +27,19 @@
   <p id="gate-error" class="error"></p>
 </section>
 
+<section id="usb-gate" class="panel">
+  <h2>Or pull over USB <span class="hint">device must have USB Transfer open (Maintenance &rarr; Down)</span></h2>
+  <div class="usb-row">
+    <label class="usb-port-label">Serial port
+      <select id="usb-port"></select>
+    </label>
+    <button type="button" id="usb-refresh">Refresh ports</button>
+    <button type="button" id="usb-browse">List files</button>
+  </div>
+  <ul id="usb-files"></ul>
+  <p id="usb-error" class="error"></p>
+</section>
+
 <main id="dashboard" hidden>
   <section class="panel">
     <h2>Pulse Grid <span class="hint">ambient RF density by hour</span></h2>

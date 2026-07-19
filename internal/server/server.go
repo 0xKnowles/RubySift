@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -55,6 +56,9 @@ func (s *Server) routes(assets http.FileSystem) {
 	s.mux.HandleFunc("/api/records", s.handleRecords)
 	s.mux.HandleFunc("/api/pulse", s.handlePulse)
 	s.mux.HandleFunc("/api/proximity", s.handleProximity)
+	s.mux.HandleFunc("/api/usb/ports", s.handleUsbPorts)
+	s.mux.HandleFunc("/api/usb/list", s.handleUsbList)
+	s.mux.HandleFunc("/api/usb/pull", s.handleUsbPull)
 }
 
 type openRequest struct {
@@ -117,14 +121,29 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	sess, err := cipher.NewSession(key)
+	records, err := decryptRecords(f, key)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusUnprocessableEntity, "decryption failed (wrong key or corrupted log): "+err.Error())
 		return
 	}
 
+	s.loadSession(req.Path, records)
+	writeJSON(w, http.StatusOK, openResponse{
+		Records: len(records),
+		Source:  req.Path,
+	})
+}
+
+// decryptRecords runs the full AES-256-GCM decrypt + record-parse pipeline over r. Shared by the
+// local-file-path flow (handleOpen) and the USB pull flow (handleUsbPull) — neither writes the
+// source bytes to disk, they just differ in where the encrypted bytes come from.
+func decryptRecords(r io.Reader, key [cipher.KeySize]byte) ([]parser.Record, error) {
+	sess, err := cipher.NewSession(key)
+	if err != nil {
+		return nil, err
+	}
 	var records []parser.Record
-	err = sess.DecryptStream(f, func(plain []byte) error {
+	err = sess.DecryptStream(r, func(plain []byte) error {
 		rec, err := parser.Decode(plain)
 		if err != nil {
 			return err
@@ -133,20 +152,17 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "decryption failed (wrong key or corrupted log): "+err.Error())
-		return
+		return nil, err
 	}
+	return records, nil
+}
 
+func (s *Server) loadSession(source string, records []parser.Record) {
 	s.session.mu.Lock()
 	s.session.loaded = true
-	s.session.sourceFile = req.Path
+	s.session.sourceFile = source
 	s.session.records = records
 	s.session.mu.Unlock()
-
-	writeJSON(w, http.StatusOK, openResponse{
-		Records: len(records),
-		Source:  req.Path,
-	})
 }
 
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
