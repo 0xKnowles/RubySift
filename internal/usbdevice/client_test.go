@@ -141,6 +141,14 @@ func TestClientGet(t *testing.T) {
 			t.Errorf("device saw filename %q", payload)
 		}
 		device.sendFrame(opGetOk, want)
+
+		// The client sends this once it's fully read the payload -- see Get()'s comment. net.Pipe
+		// is unbuffered/synchronous, so without a reader here the client's write would block
+		// forever and hang the test.
+		ackOp, _ := device.recvFrame()
+		if ackOp != opGetAck {
+			t.Errorf("device saw opcode 0x%02x after Get, want opGetAck", ackOp)
+		}
 	}()
 
 	got, err := client.Get("20260717.pclog")

@@ -28,10 +28,11 @@ var magic = [4]byte{'R', 'B', 'Y', '1'}
 type opcode byte
 
 const (
-	opPing opcode = 0x01
-	opList opcode = 0x02
-	opGet  opcode = 0x03
-	opKey  opcode = 0x04
+	opPing   opcode = 0x01
+	opList   opcode = 0x02
+	opGet    opcode = 0x03
+	opKey    opcode = 0x04
+	opGetAck opcode = 0x05 // sent after fully reading a Get() response body -- see client.go's Get()
 
 	opPong   opcode = 0x81
 	opListOk opcode = 0x82

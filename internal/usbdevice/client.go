@@ -162,6 +162,14 @@ func (c *Client) Get(name string) ([]byte, error) {
 	if err := readWithProgress(c.port, data, name); err != nil {
 		return nil, fmt.Errorf("usbdevice: reading file body: %w", err)
 	}
+
+	// The device blocks (see UsbTransferActivity::waitForGetAck) waiting for this before it
+	// considers the transfer done. Necessary on real hardware even with the device retrying short
+	// writes and flushing its USB CDC buffer: neither proves the host actually has the bytes yet,
+	// only that the device's own side let go of them. Best-effort -- if this write fails the device
+	// will just time out its own wait and move on, no worse off than before this existed.
+	_ = writeFrame(c.port, opGetAck, nil)
+
 	return data, nil
 }
 
